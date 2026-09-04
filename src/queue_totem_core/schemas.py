@@ -28,6 +28,15 @@ class QueueConfig(BaseModel):
     timezone: str | None = None
     # timezone IANA (ex.: "America/Fortaleza") usada para definir o "dia" da fila.
     # None -> data local do servidor. Importante em containers rodando em UTC.
+    normals_per_priority: int = Field(default=0, ge=0)
+    # Política de "chamar próximo" quando há prioritários e normais aguardando:
+    #   0  -> prioridade estrita: esvazia todos os prioritários antes dos normais,
+    #         seguindo priority_order + FIFO (comportamento padrão).
+    #   N>0 -> intercalação justa: a cada N senhas normais chamadas, a próxima
+    #         chamada é de um prioritário aguardando. Evita que uma enxurrada de
+    #         prioritários trave indefinidamente a fila normal.
+    # Dentro de cada faixa (prioritário / normal) a ordem continua sendo
+    # priority_order + FIFO.
 
     @field_validator("timezone")
     @classmethod

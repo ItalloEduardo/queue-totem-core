@@ -20,3 +20,48 @@ def ticket_rank(ticket: QueueTicket, rank_map: RankMap) -> int:
 def sort_queue(tickets: list[QueueTicket], rank_map: RankMap) -> list[QueueTicket]:
     """Prioridade via rank + FIFO (created_at, id) dentro da mesma faixa."""
     return sorted(tickets, key=lambda t: (ticket_rank(t, rank_map), t.created_at, t.id))
+
+
+def trailing_normal_streak(called: list[QueueTicket]) -> int:
+    """Quantas senhas normais foram chamadas desde a última prioritária (ou o início do dia).
+
+    `called` deve vir ordenado por called_at ascendente.
+    """
+    streak = 0
+    for ticket in reversed(called):
+        if ticket.is_priority:
+            break
+        streak += 1
+    return streak
+
+
+def pick_next(
+    waiting: list[QueueTicket],
+    called: list[QueueTicket],
+    rank_map: RankMap,
+    normals_per_priority: int = 0,
+) -> QueueTicket | None:
+    """Escolhe a próxima senha a chamar.
+
+    - `waiting`: senhas em `na_fila`.
+    - `called`: senhas já chamadas hoje, ordenadas por called_at ascendente
+      (só é consultado quando `normals_per_priority > 0`).
+    - `normals_per_priority == 0`: prioridade estrita — primeira da fila ordenada
+      por `priority_order` + FIFO.
+    - `normals_per_priority == N`: a cada N normais chamadas em sequência, a
+      próxima é um prioritário aguardando (intercalação justa).
+    """
+    ordered = sort_queue(waiting, rank_map)
+    if not ordered:
+        return None
+    if normals_per_priority <= 0:
+        return ordered[0]
+
+    priority = [t for t in ordered if t.is_priority]
+    normal = [t for t in ordered if not t.is_priority]
+    if not priority or not normal:
+        return ordered[0]
+
+    if trailing_normal_streak(called) >= normals_per_priority:
+        return priority[0]
+    return normal[0]

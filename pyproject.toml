@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "queue-totem-core"
-version = "0.1.0"
+version = "0.2.0"
 description = "Fila de atendimento presencial (totem/senha/painel) como router FastAPI plugável, agnóstico de domínio"
 readme = "README.md"
 requires-python = ">=3.11"

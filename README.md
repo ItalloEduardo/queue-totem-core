@@ -10,7 +10,7 @@ Contexto completo de design e decisões: [`docs/PLANO.md`](docs/PLANO.md).
 Sem PyPI — dependência git fixada por tag semver:
 
 ```
-queue-totem-core @ git+https://github.com/<usuario>/queue-totem-core.git@v0.1.0
+queue-totem-core @ git+https://github.com/<usuario>/queue-totem-core.git@v0.2.0
 ```
 
 Requisitos do host: Python 3.11+, FastAPI 0.104+, SQLAlchemy 2.0 async, Pydantic v2.
@@ -36,6 +36,7 @@ config = QueueConfig(
     daily_reset=True,
     max_recall_attempts=1,
     timezone="America/Fortaleza",  # define o "dia" da fila; importante em container UTC
+    normals_per_priority=2,        # 1 prioritário a cada 2 normais (0 = prioridade estrita)
 )
 
 app = FastAPI()
@@ -63,10 +64,22 @@ async def startup():
 | POST | `/tickets` | Público | Totem emite senha (número sequencial do dia por tipo) |
 | GET | `/display` | Público | Painel de TV: senha chamada atual + últimas N (polling) |
 | GET | `/tickets` | `read_dependency` | Fila do dia, ordenada por prioridade + FIFO (`?status=` opcional) |
-| POST | `/tickets/next` | `manage_dependency` | Chamar próxima senha |
+| POST | `/tickets/next` | `manage_dependency` | Chamar próxima senha (aplica `priority_order` + `normals_per_priority`) |
 | PATCH | `/tickets/{id}/recall` | `manage_dependency` | Chamar novamente (respeita `max_recall_attempts`) |
 | PATCH | `/tickets/{id}/no-show` | `manage_dependency` | Marcar não compareceu |
 | PATCH | `/tickets/{id}/status` | `manage_dependency` | Transição manual: `em_atendimento` / `concluido` |
+
+## Política de prioridade ("chamar próximo")
+
+`priority_order` define o ranking de `(tipo, is_priority)` e o desempate é FIFO
+(`created_at`). Como isso combina prioritários e normais depende de `normals_per_priority`:
+
+- **`0` (padrão) — prioridade estrita**: esvazia todos os prioritários antes dos
+  normais. Simples, mas uma fila cheia de prioritários trava os normais.
+- **`N > 0` — intercalação justa**: a cada `N` senhas normais chamadas em sequência,
+  a próxima chamada é de um prioritário aguardando. Ex.: `N=2` produz o padrão
+  `normal, normal, prioritário, normal, normal, prioritário, …`. Se só há um dos
+  grupos aguardando, chama esse; prioritários nunca "furam" mais do que a cota.
 
 ## Ciclo de vida
 

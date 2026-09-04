@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+
 import pytest
 from fastapi import FastAPI, Header, HTTPException
 from httpx import ASGITransport, AsyncClient
@@ -94,6 +96,14 @@ def app(config, session_factory) -> FastAPI:
 @pytest.fixture
 async def client(app):
     transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
+
+
+@asynccontextmanager
+async def client_for(session_factory, config: QueueConfig):
+    """Cliente HTTP para uma app com config sob medida (fora do fixture padrão)."""
+    transport = ASGITransport(app=make_app(session_factory, config))
     async with AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
 

@@ -143,6 +143,7 @@ class QueueConfig(BaseModel):
     priority_order: list[tuple[str, bool]]   # lista ordenada de (ticket_type, is_priority) -> rank
     daily_reset: bool = True                 # sequência reinicia a cada dia?
     max_recall_attempts: int = 1             # quantas vezes pode "chamar novamente" antes de nao_compareceu
+    normals_per_priority: int = 0            # 0 = prioridade estrita; N = 1 prioritário a cada N normais
 ```
 
 Exemplo de configuração equivalente ao caso de uso original do `ubs-pet` (útil como referência,
@@ -184,6 +185,9 @@ na_fila → chamado → em_atendimento → concluido
 - Senha nasce direto em `na_fila` (sem estado intermediário morto tipo "aguardando").
 - "Chamar próximo": seleciona o ticket elegível de maior prioridade (via `priority_order`) + FIFO
   dentro da mesma faixa de prioridade (`created_at` crescente), muda para `chamado`.
+  Se `normals_per_priority > 0`, aplica intercalação justa: a cada N normais chamadas em
+  sequência, a próxima chamada é de um prioritário aguardando (evita que uma enxurrada de
+  prioritários trave a fila normal).
 - "Chamar novamente": só permitido em `status == "chamado"`; incrementa contador de recall; ao
   atingir `max_recall_attempts`, uma nova tentativa deve ser rejeitada (400) sugerindo marcar como
   `nao_compareceu`.

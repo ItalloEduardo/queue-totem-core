@@ -8,7 +8,14 @@ from pydantic import ValidationError
 import queue_totem_core.router as router_module
 from queue_totem_core import QueueTicket, TicketTypeConfig
 
-from .conftest import MANAGE_HEADERS, READ_HEADERS, call_next, emit, make_config
+from .conftest import (
+    MANAGE_HEADERS,
+    READ_HEADERS,
+    call_next,
+    client_for,
+    emit,
+    make_config,
+)
 
 
 class TestEmission:
@@ -139,6 +146,56 @@ class TestPriorityOrder:
         assert resp.status_code == 200
         numbers = [t["ticket_number"] for t in resp.json()]
         assert numbers == ["AG-001", "TR-001", "FM-001"]
+
+
+class TestInterleavedPriority:
+    async def _ids(self, client, n):
+        return [(await call_next(client))["id"] for _ in range(n)]
+
+    async def test_one_priority_every_n_normals(self, session_factory):
+        config = make_config(normals_per_priority=2)
+        async with client_for(session_factory, config) as client:
+            n1 = await emit(client, "TR")
+            n2 = await emit(client, "TR")
+            p1 = await emit(client, "TR", is_priority=True)
+            n3 = await emit(client, "TR")
+            n4 = await emit(client, "TR")
+            p2 = await emit(client, "TR", is_priority=True)
+            # padrão: N N P N N P
+            assert await self._ids(client, 6) == [
+                n1["id"], n2["id"], p1["id"], n3["id"], n4["id"], p2["id"]
+            ]
+
+    async def test_drains_priority_when_no_normals_left(self, session_factory):
+        config = make_config(normals_per_priority=2)
+        async with client_for(session_factory, config) as client:
+            n1 = await emit(client, "TR")
+            p1 = await emit(client, "TR", is_priority=True)
+            p2 = await emit(client, "TR", is_priority=True)
+            # streak 0 -> normal; depois só sobram prioritários
+            assert await self._ids(client, 3) == [n1["id"], p1["id"], p2["id"]]
+
+    async def test_priority_called_immediately_when_streak_already_met(self, session_factory):
+        config = make_config(normals_per_priority=2)
+        async with client_for(session_factory, config) as client:
+            await emit(client, "TR")
+            await emit(client, "TR")
+            await self._ids(client, 2)  # 2 normais chamadas, streak = 2
+            p1 = await emit(client, "TR", is_priority=True)
+            await emit(client, "TR")
+            assert (await call_next(client))["id"] == p1["id"]
+
+    async def test_zero_keeps_strict_priority(self, session_factory):
+        config = make_config(normals_per_priority=0)
+        async with client_for(session_factory, config) as client:
+            n1 = await emit(client, "TR")
+            n2 = await emit(client, "TR")
+            p1 = await emit(client, "TR", is_priority=True)
+            assert await self._ids(client, 3) == [p1["id"], n1["id"], n2["id"]]
+
+    async def test_negative_ratio_rejected(self):
+        with pytest.raises(ValidationError):
+            make_config(normals_per_priority=-1)
 
 
 class TestLifecycle:

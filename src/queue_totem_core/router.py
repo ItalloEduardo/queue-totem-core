@@ -19,7 +19,7 @@ from .models import (
     QueueTicket,
     utcnow,
 )
-from .priority import build_rank_map, sort_queue
+from .priority import build_rank_map, pick_next, sort_queue
 from .schemas import (
     DisplayOut,
     QueueConfig,
@@ -192,16 +192,41 @@ def build_queue_router(
     )
     async def call_next(db: AsyncSession = Depends(get_db)) -> TicketOut:
         for _ in range(_SEQUENCE_MAX_ATTEMPTS):
-            stmt = select(QueueTicket).where(
-                QueueTicket.ticket_date == _today(),
-                QueueTicket.status == STATUS_NA_FILA,
+            today = _today()
+            waiting = list(
+                (
+                    await db.scalars(
+                        select(QueueTicket).where(
+                            QueueTicket.ticket_date == today,
+                            QueueTicket.status == STATUS_NA_FILA,
+                        )
+                    )
+                ).all()
             )
-            waiting = list((await db.scalars(stmt)).all())
             if not waiting:
                 raise HTTPException(
                     http_status.HTTP_404_NOT_FOUND, "Não há senhas aguardando na fila"
                 )
-            ticket = sort_queue(waiting, rank_map)[0]
+
+            called: list[QueueTicket] = []
+            if config.normals_per_priority > 0:
+                called = list(
+                    (
+                        await db.scalars(
+                            select(QueueTicket)
+                            .where(
+                                QueueTicket.ticket_date == today,
+                                QueueTicket.called_at.is_not(None),
+                            )
+                            .order_by(
+                                QueueTicket.called_at.asc(), QueueTicket.id.asc()
+                            )
+                        )
+                    ).all()
+                )
+
+            ticket = pick_next(waiting, called, rank_map, config.normals_per_priority)
+            assert ticket is not None  # waiting não está vazio
             # Guarda otimista: se outro atendente chamou o mesmo ticket em paralelo,
             # o UPDATE condicional não afeta linha nenhuma e o loop tenta o seguinte.
             result = await db.execute(
