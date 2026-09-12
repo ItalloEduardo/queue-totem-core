@@ -20,6 +20,13 @@ class TicketTypeConfig(BaseModel):
     # "none"          -> tipo nunca é prioritário
 
 
+class StationConfig(BaseModel):
+    """Um ponto de atendimento com fila própria. `code` é string opaca do host."""
+
+    code: str = Field(min_length=1, max_length=32)
+    label: str = Field(min_length=1)
+
+
 class QueueConfig(BaseModel):
     ticket_types: list[TicketTypeConfig] = Field(min_length=1)
     priority_order: list[tuple[str, bool]] = Field(min_length=1)
@@ -37,6 +44,14 @@ class QueueConfig(BaseModel):
     #         prioritários trave indefinidamente a fila normal.
     # Dentro de cada faixa (prioritário / normal) a ordem continua sendo
     # priority_order + FIFO.
+    stations: list[StationConfig] | None = None
+    entry_station: str | None = None
+    # Estações (v0.3.0). Opcional:
+    #   None -> modo estação única: o pacote se comporta exatamente como na v0.2.0.
+    #   lista -> modo multi-estação: cada estação tem fila e "chamar próximo" próprios.
+    #            `entry_station` é obrigatório e define onde a senha nasce ao ser
+    #            emitida no totem. O pacote não sabe a ordem entre estações —
+    #            roteamento é decisão do host, via PATCH /tickets/{id}/station.
 
     @field_validator("timezone")
     @classmethod
@@ -81,7 +96,39 @@ class QueueConfig(BaseModel):
                         f"priority_order não cobre a combinação {combo} — toda combinação "
                         "possível de (tipo, prioridade) precisa ter um rank definido"
                     )
+
+        if self.stations is None:
+            if self.entry_station is not None:
+                raise ValueError(
+                    "entry_station foi informado sem stations — declare as estações "
+                    "ou remova entry_station para operar em modo estação única"
+                )
+        else:
+            if not self.stations:
+                raise ValueError(
+                    "stations não pode ser lista vazia — use None para modo estação única"
+                )
+            station_codes = [st.code for st in self.stations]
+            if len(station_codes) != len(set(station_codes)):
+                raise ValueError("stations contém códigos duplicados")
+            if self.entry_station is None:
+                raise ValueError(
+                    "entry_station é obrigatório quando stations é declarado — "
+                    "é onde a senha nasce ao ser emitida"
+                )
+            if self.entry_station not in station_codes:
+                raise ValueError(
+                    f"entry_station {self.entry_station!r} não está em stations"
+                )
         return self
+
+    @property
+    def multi_station(self) -> bool:
+        return self.stations is not None
+
+    @property
+    def station_labels(self) -> dict[str, str]:
+        return {st.code: st.label for st in (self.stations or [])}
 
 
 class TicketCreate(BaseModel):
@@ -107,6 +154,10 @@ class TicketOut(BaseModel):
     reference_label: str | None
     status: str
     recall_count: int
+    station: str | None = None
+    station_label: str | None = None
+    station_entered_at: datetime | None = None
+    queued_since: datetime | None = None
     created_at: datetime
     called_at: datetime | None
     finished_at: datetime | None
@@ -116,6 +167,40 @@ class TicketStatusUpdate(BaseModel):
     status: Literal[STATUS_EM_ATENDIMENTO, STATUS_CONCLUIDO]  # type: ignore[valid-type]
 
 
+class TicketStationUpdate(BaseModel):
+    station: str = Field(min_length=1, max_length=32)
+
+
+class TicketStationMoveOut(TicketOut):
+    """Resposta do PATCH de estação: o ticket já movido + o tempo na estação anterior.
+
+    O pacote não guarda histórico de etapas — quem quiser auditar a jornada
+    persiste esses dois campos no próprio domínio.
+    """
+
+    previous_station: str | None = None
+    previous_station_seconds: float | None = None
+
+
+class StationDisplayOut(BaseModel):
+    station: str
+    station_label: str | None = None
+    current: TicketOut | None = None
+
+
 class DisplayOut(BaseModel):
+    """Payload do painel em modo estação única — idêntico ao da v0.2.0."""
+
     current: TicketOut | None
     recent: list[TicketOut]
+
+
+class DisplayWithStationsOut(DisplayOut):
+    """Payload do painel em modo multi-estação.
+
+    `stations` traz um chamado corrente por estação. `current` continua sendo o
+    chamado mais recente entre todas elas, mantido para não quebrar painéis da
+    v0.2.0 — depreciar em versão futura.
+    """
+
+    stations: list[StationDisplayOut] = []

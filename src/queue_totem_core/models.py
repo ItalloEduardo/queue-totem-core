@@ -52,6 +52,14 @@ class QueueTicket(Base):
         String(32), nullable=False, default=STATUS_NA_FILA, index=True
     )
     recall_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # --- estações (v0.3.0) ---
+    # Nullable por compatibilidade: bancos anteriores à v0.3.0 e projetos em
+    # modo estação única mantêm essas colunas vazias.
+    station: Mapped[str | None] = mapped_column(String(32), index=True)
+    station_entered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Carimbo de chegada original, imutável ao longo da jornada entre estações.
+    # É ele que define o FIFO em qualquer fila — não o station_entered_at.
+    queued_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utcnow
     )

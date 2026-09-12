@@ -13,13 +13,17 @@ from .router import build_queue_router
 from .schemas import (
     DisplayOut,
     QueueConfig,
+    StationConfig,
+    StationDisplayOut,
     TicketCreate,
     TicketOut,
+    TicketStationMoveOut,
+    TicketStationUpdate,
     TicketStatusUpdate,
     TicketTypeConfig,
 )
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "ALL_STATUSES",
@@ -32,8 +36,12 @@ __all__ = [
     "DisplayOut",
     "QueueConfig",
     "QueueTicket",
+    "StationConfig",
+    "StationDisplayOut",
     "TicketCreate",
     "TicketOut",
+    "TicketStationMoveOut",
+    "TicketStationUpdate",
     "TicketStatusUpdate",
     "TicketTypeConfig",
     "build_queue_router",

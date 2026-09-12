@@ -10,6 +10,7 @@ from sqlalchemy.pool import StaticPool
 
 from queue_totem_core import (
     QueueConfig,
+    StationConfig,
     TicketTypeConfig,
     build_queue_router,
     init_queue_tables,
@@ -38,6 +39,20 @@ def make_config(**overrides) -> QueueConfig:
     )
     defaults.update(overrides)
     return QueueConfig(**defaults)
+
+
+STATIONS = [
+    StationConfig(code="recepcao", label="Recepção"),
+    StationConfig(code="consultorio", label="Consultório"),
+    StationConfig(code="farmacia", label="Farmácia"),
+]
+
+
+def make_station_config(**overrides) -> QueueConfig:
+    """Config em modo multi-estação, com a recepção como porta de entrada."""
+    base = dict(stations=STATIONS, entry_station="recepcao")
+    base.update(overrides)
+    return make_config(**base)
 
 
 @pytest.fixture
@@ -114,7 +129,31 @@ async def emit(client, ticket_type: str, **kwargs) -> dict:
     return resp.json()
 
 
-async def call_next(client) -> dict:
-    resp = await client.post("/queue/tickets/next", headers=MANAGE_HEADERS)
+async def call_next(client, station: str | None = None) -> dict:
+    params = {"station": station} if station is not None else None
+    resp = await client.post(
+        "/queue/tickets/next", params=params, headers=MANAGE_HEADERS
+    )
     assert resp.status_code == 200, resp.text
     return resp.json()
+
+
+async def move_station(client, ticket_id: int, station: str) -> dict:
+    resp = await client.patch(
+        f"/queue/tickets/{ticket_id}/station",
+        json={"station": station},
+        headers=MANAGE_HEADERS,
+    )
+    assert resp.status_code == 200, resp.text
+    return resp.json()
+
+
+@pytest.fixture
+def station_config() -> QueueConfig:
+    return make_station_config()
+
+
+@pytest.fixture
+async def station_client(session_factory, station_config):
+    async with client_for(session_factory, station_config) as c:
+        yield c

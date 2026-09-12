@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from .models import QueueTicket
 from .schemas import QueueConfig
 
@@ -17,9 +19,19 @@ def ticket_rank(ticket: QueueTicket, rank_map: RankMap) -> int:
     return rank_map.get((ticket.ticket_type, ticket.is_priority), len(rank_map))
 
 
+def arrival(ticket: QueueTicket) -> datetime:
+    """Carimbo de chegada original — base do FIFO em qualquer estação.
+
+    `queued_since` é preservado ao longo da jornada entre estações: quem esperou
+    40 minutos na recepção não vai para o fim da fila do consultório. Cai para
+    `created_at` em tickets anteriores à v0.3.0, onde a coluna é NULL.
+    """
+    return ticket.queued_since or ticket.created_at
+
+
 def sort_queue(tickets: list[QueueTicket], rank_map: RankMap) -> list[QueueTicket]:
-    """Prioridade via rank + FIFO (created_at, id) dentro da mesma faixa."""
-    return sorted(tickets, key=lambda t: (ticket_rank(t, rank_map), t.created_at, t.id))
+    """Prioridade via rank + FIFO (chegada original, id) dentro da mesma faixa."""
+    return sorted(tickets, key=lambda t: (ticket_rank(t, rank_map), arrival(t), t.id))
 
 
 def trailing_normal_streak(called: list[QueueTicket]) -> int:

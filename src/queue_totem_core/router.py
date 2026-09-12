@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
@@ -22,9 +22,13 @@ from .models import (
 from .priority import build_rank_map, pick_next, sort_queue
 from .schemas import (
     DisplayOut,
+    DisplayWithStationsOut,
     QueueConfig,
+    StationDisplayOut,
     TicketCreate,
     TicketOut,
+    TicketStationMoveOut,
+    TicketStationUpdate,
     TicketStatusUpdate,
 )
 
@@ -60,6 +64,11 @@ def build_queue_router(
     router = APIRouter()
     rank_map = build_rank_map(config)
     types_by_code = {t.code: t for t in config.ticket_types}
+    station_labels = config.station_labels
+    multi_station = config.multi_station
+    # Em modo estação única o painel devolve exatamente o JSON da v0.2.0 —
+    # sem campo `stations` sequer presente.
+    display_model = DisplayWithStationsOut if multi_station else DisplayOut
     tz = ZoneInfo(config.timezone) if config.timezone else None
     read_deps = [Depends(read_dependency)] if read_dependency else []
     manage_deps = [Depends(manage_dependency)] if manage_dependency else []
@@ -67,11 +76,31 @@ def build_queue_router(
     def _today() -> date:
         return datetime.now(tz).date() if tz else date.today()
 
-    def _to_out(ticket: QueueTicket) -> TicketOut:
-        out = TicketOut.model_validate(ticket)
+    def _to_out(ticket: QueueTicket, model: type[TicketOut] = TicketOut) -> Any:
+        out = model.model_validate(ticket)
         ttype = types_by_code.get(ticket.ticket_type)
         out.ticket_label = ttype.label if ttype else None
+        out.station_label = (
+            station_labels.get(ticket.station) if ticket.station else None
+        )
         return out
+
+    def _require_multi_station() -> None:
+        if not multi_station:
+            raise HTTPException(
+                http_status.HTTP_400_BAD_REQUEST,
+                "O pacote está em modo estação única: declare `stations` no "
+                "QueueConfig para usar filas por estação",
+            )
+
+    def _validate_station(station: str) -> str:
+        _require_multi_station()
+        if station not in station_labels:
+            raise HTTPException(
+                http_status.HTTP_400_BAD_REQUEST,
+                f"Estação desconhecida: {station!r}",
+            )
+        return station
 
     async def _get_ticket(db: AsyncSession, ticket_id: int) -> QueueTicket:
         ticket = await db.get(QueueTicket, ticket_id)
@@ -104,6 +133,7 @@ def build_queue_router(
         for _ in range(_SEQUENCE_MAX_ATTEMPTS):
             count = await _count_existing(db, ttype.code, today, config.daily_reset)
             sequence = count + 1
+            now = utcnow()
             ticket = QueueTicket(
                 ticket_type=ttype.code,
                 ticket_date=today,
@@ -114,6 +144,9 @@ def build_queue_router(
                 reference_code=payload.reference_code,
                 reference_label=payload.reference_label,
                 status=STATUS_NA_FILA,
+                station=config.entry_station,
+                station_entered_at=now if multi_station else None,
+                queued_since=now,
             )
             db.add(ticket)
             try:
@@ -131,13 +164,13 @@ def build_queue_router(
 
     @router.get(
         "/display",
-        response_model=DisplayOut,
+        response_model=display_model,
         summary="Painel de chamada (TV — público, polling)",
     )
     async def display(
         limit: int = Query(default=5, ge=1, le=20),
         db: AsyncSession = Depends(get_db),
-    ) -> DisplayOut:
+    ) -> Any:
         today = _today()
         current = await db.scalar(
             select(QueueTicket)
@@ -159,9 +192,36 @@ def build_queue_router(
                 .limit(limit)
             )
         ).all()
-        return DisplayOut(
+        if not multi_station:
+            return DisplayOut(
+                current=_to_out(current) if current else None,
+                recent=[_to_out(t) for t in recent],
+            )
+
+        stations: list[StationDisplayOut] = []
+        for code, label in station_labels.items():
+            station_current = await db.scalar(
+                select(QueueTicket)
+                .where(
+                    QueueTicket.ticket_date == today,
+                    QueueTicket.status == STATUS_CHAMADO,
+                    QueueTicket.station == code,
+                )
+                .order_by(QueueTicket.called_at.desc())
+                .limit(1)
+            )
+            stations.append(
+                StationDisplayOut(
+                    station=code,
+                    station_label=label,
+                    current=_to_out(station_current) if station_current else None,
+                )
+            )
+
+        return DisplayWithStationsOut(
             current=_to_out(current) if current else None,
             recent=[_to_out(t) for t in recent],
+            stations=stations,
         )
 
     @router.get(
@@ -172,15 +232,22 @@ def build_queue_router(
     )
     async def list_tickets(
         status: str | None = Query(default=None),
+        station: str | None = Query(
+            default=None, description="Filtra a fila de uma estação (modo multi-estação)"
+        ),
         db: AsyncSession = Depends(get_db),
     ) -> list[TicketOut]:
         if status is not None and status not in ALL_STATUSES:
             raise HTTPException(
                 http_status.HTTP_400_BAD_REQUEST, f"Status desconhecido: {status!r}"
             )
+        if station is not None:
+            _validate_station(station)
         stmt = select(QueueTicket).where(QueueTicket.ticket_date == _today())
         if status is not None:
             stmt = stmt.where(QueueTicket.status == status)
+        if station is not None:
+            stmt = stmt.where(QueueTicket.station == station)
         tickets = list((await db.scalars(stmt)).all())
         return [_to_out(t) for t in sort_queue(tickets, rank_map)]
 
@@ -190,40 +257,50 @@ def build_queue_router(
         dependencies=manage_deps,
         summary="Chamar próxima senha",
     )
-    async def call_next(db: AsyncSession = Depends(get_db)) -> TicketOut:
+    async def call_next(
+        station: str | None = Query(
+            default=None,
+            description=(
+                "Chama a próxima da fila dessa estação. Sem o parâmetro, mantém o "
+                "comportamento da v0.2.0: próxima senha global."
+            ),
+        ),
+        db: AsyncSession = Depends(get_db),
+    ) -> TicketOut:
+        if station is not None:
+            _validate_station(station)
         for _ in range(_SEQUENCE_MAX_ATTEMPTS):
             today = _today()
-            waiting = list(
-                (
-                    await db.scalars(
-                        select(QueueTicket).where(
-                            QueueTicket.ticket_date == today,
-                            QueueTicket.status == STATUS_NA_FILA,
-                        )
-                    )
-                ).all()
+            waiting_stmt = select(QueueTicket).where(
+                QueueTicket.ticket_date == today,
+                QueueTicket.status == STATUS_NA_FILA,
             )
+            if station is not None:
+                waiting_stmt = waiting_stmt.where(QueueTicket.station == station)
+            waiting = list((await db.scalars(waiting_stmt)).all())
             if not waiting:
                 raise HTTPException(
-                    http_status.HTTP_404_NOT_FOUND, "Não há senhas aguardando na fila"
+                    http_status.HTTP_404_NOT_FOUND,
+                    f"Não há senhas aguardando na estação {station!r}"
+                    if station is not None
+                    else "Não há senhas aguardando na fila",
                 )
 
             called: list[QueueTicket] = []
             if config.normals_per_priority > 0:
-                called = list(
-                    (
-                        await db.scalars(
-                            select(QueueTicket)
-                            .where(
-                                QueueTicket.ticket_date == today,
-                                QueueTicket.called_at.is_not(None),
-                            )
-                            .order_by(
-                                QueueTicket.called_at.asc(), QueueTicket.id.asc()
-                            )
-                        )
-                    ).all()
+                # A intercalação justa é contada dentro da própria estação: chamadas
+                # de outra estação não podem consumir a cota de normais desta.
+                called_stmt = (
+                    select(QueueTicket)
+                    .where(
+                        QueueTicket.ticket_date == today,
+                        QueueTicket.called_at.is_not(None),
+                    )
+                    .order_by(QueueTicket.called_at.asc(), QueueTicket.id.asc())
                 )
+                if station is not None:
+                    called_stmt = called_stmt.where(QueueTicket.station == station)
+                called = list((await db.scalars(called_stmt)).all())
 
             ticket = pick_next(waiting, called, rank_map, config.normals_per_priority)
             assert ticket is not None  # waiting não está vazio
@@ -315,5 +392,50 @@ def build_queue_router(
         await db.commit()
         await db.refresh(ticket)
         return _to_out(ticket)
+
+    @router.patch(
+        "/tickets/{ticket_id}/station",
+        response_model=TicketStationMoveOut,
+        dependencies=manage_deps,
+        summary="Mover senha para outra estação (volta para a fila)",
+    )
+    async def move_station(
+        ticket_id: int,
+        payload: TicketStationUpdate,
+        db: AsyncSession = Depends(get_db),
+    ) -> TicketStationMoveOut:
+        """Expressa "terminou aqui, foi para lá". Quem decide o destino é o host.
+
+        O pacote não conhece a ordem entre estações e por isso não valida a
+        transição: qualquer estação declarada é destino válido, a partir de
+        qualquer status.
+        """
+        target = _validate_station(payload.station)
+        ticket = await _get_ticket(db, ticket_id)
+
+        now = utcnow()
+        previous_station = ticket.station
+        previous_seconds: float | None = None
+        if ticket.station_entered_at is not None:
+            entered = ticket.station_entered_at
+            if entered.tzinfo is None:
+                entered = entered.replace(tzinfo=timezone.utc)
+            previous_seconds = (now - entered).total_seconds()
+
+        ticket.station = target
+        ticket.station_entered_at = now
+        ticket.status = STATUS_NA_FILA
+        # queued_since NÃO é tocado: é a chegada original e define o FIFO da
+        # nova fila. Quem esperou na recepção não recomeça atrás de todo mundo.
+        ticket.called_at = None
+        ticket.finished_at = None
+        ticket.recall_count = 0
+        await db.commit()
+        await db.refresh(ticket)
+
+        out: TicketStationMoveOut = _to_out(ticket, TicketStationMoveOut)
+        out.previous_station = previous_station
+        out.previous_station_seconds = previous_seconds
+        return out
 
     return router
