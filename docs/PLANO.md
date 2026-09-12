@@ -55,7 +55,7 @@ mesmo desenvolvedor) usam:
 | ORM | SQLAlchemy 2.0 async | 2.0.35+ |
 | Driver Postgres | asyncpg | 0.29+ |
 | Validação | Pydantic v2 | 2.5+ |
-| Migrations | Alembic | 1.13+ (mas ver seção 5 — este pacote **não** se integra à cadeia Alembic do host) |
+| Migrations | Alembic | 1.13+ — dependência do pacote desde a v0.3.0; cadeia **própria**, com `version_table` separado, que **não** se integra à do host (ver 5.4) |
 | Runtime | Python | 3.11 |
 
 Este pacote **deve declarar dependências compatíveis com essas versões** (não fixar versões mais
@@ -70,8 +70,8 @@ roda um FastAPI app com SQLAlchemy async + Postgres já configurado.
   domínio aqui (é lógica genérica de fila/senha), e um repo público elimina a necessidade de
   configurar SSH deploy keys ou GitHub tokens como build secret em todo Dockerfile de todo projeto
   consumidor — `pip install git+https://github.com/...` funciona sem autenticação nenhuma.
-- **Versionamento por tag semver** (`v0.1.0`, `v0.2.0`, ...). Cada projeto consumidor fixa uma tag
-  específica no `requirements.txt`, nunca aponta para `main`/`HEAD`:
+- **Versionamento por tag semver** (`v0.1.0`, `v0.2.0`, `v0.3.0`, ...). Cada projeto consumidor
+  fixa uma tag específica no `requirements.txt`, nunca aponta para `main`/`HEAD`:
   ```
   queue-totem-core @ git+https://github.com/<usuario>/queue-totem-core.git@v0.1.0
   ```
@@ -138,12 +138,18 @@ class TicketTypeConfig(BaseModel):
     # "self_declared" -> quem emite a senha (o totem) declara a prioridade no momento da emissão
     # "none"          -> tipo nunca é prioritário
 
+class StationConfig(BaseModel):          # v0.3.0
+    code: str                            # ex.: "recepcao", "triagem" — string opaca
+    label: str
+
 class QueueConfig(BaseModel):
     ticket_types: list[TicketTypeConfig]
     priority_order: list[tuple[str, bool]]   # lista ordenada de (ticket_type, is_priority) -> rank
     daily_reset: bool = True                 # sequência reinicia a cada dia?
     max_recall_attempts: int = 1             # quantas vezes pode "chamar novamente" antes de nao_compareceu
     normals_per_priority: int = 0            # 0 = prioridade estrita; N = 1 prioritário a cada N normais
+    stations: list[StationConfig] | None = None   # None = modo estação única (v0.2.0)
+    entry_station: str | None = None              # obrigatório quando stations é declarado
 ```
 
 Exemplo de configuração equivalente ao caso de uso original do `ubs-pet` (útil como referência,
@@ -162,18 +168,67 @@ QueueConfig(
 )
 ```
 
-### 5.4 Persistência isolada — sem integração com Alembic do host
+### 5.4 Persistência isolada — cadeia Alembic própria, separada da do host
 
-O pacote define seu **próprio `Base`/metadata** (não compartilha `Base` com o host) e cria sua(s)
-própria(s) tabela(s) via `Base.metadata.create_all(engine)` chamado explicitamente pelo host na
-inicialização (ou por uma função utilitária exposta pelo pacote, ex.:
-`await init_queue_tables(engine)`). **Não tentar integrar numa cadeia de migrations Alembic
-compartilhada** — isso acopla fortemente o versionamento do pacote ao histórico de migrations de
-cada host, o que é frágil e desnecessariamente complexo para uma tabela isolada sem FK para fora.
+O pacote define seu **próprio `Base`/metadata** (não compartilha `Base` com o host) e é dono
+exclusivo da tabela `queue_tickets`, sem FK para fora.
 
-Se no futuro for necessário rastrear alterações de schema do próprio pacote (novas colunas em
-versões futuras), considerar uma migration Alembic **interna ao próprio pacote**, aplicada de forma
-independente — mas isso é um problema para quando surgir, não para a v0.1.0.
+Até a v0.2.0 o schema nascia de `create_all`, via `await init_queue_tables(engine)` chamado pelo
+host na inicialização. Isso funciona para criar, mas **`create_all` não altera tabela existente** —
+uma coluna nova numa versão futura não apareceria sozinha em nenhum dos projetos já rodando. A
+v0.3.0 fecha esse buraco versionando o próprio schema:
+
+- **Cadeia Alembic dentro do pacote** (`queue_totem_core/migrations/`), com `version_table`
+  fixado em **`queue_versions_table`** — nunca `alembic_version`. Duas cadeias apontando para a
+  mesma tabela destroem o histórico uma da outra, e o host tem a dele no mesmo banco. O nome é
+  fixo no `env.py` do pacote: vale igual para todos os projetos, não é convenção por instalação.
+- **`include_object` blinda o host**: o autogenerate do pacote só enxerga as tabelas do próprio
+  metadata.
+- **Brownfield é caso de primeira classe**: num banco onde `queue_tickets` já existe (criada por
+  `create_all`, sem nenhuma linha de controle de versão), a revisão base detecta a tabela e faz
+  apenas o *stamp*, sem recriar nada; só o delta é aplicado. Num banco vazio, cria tudo.
+- **Roda no deploy, nunca no boot** — `python -m queue_totem_core.migrate upgrade head`, em
+  container avulso, ao lado do `alembic upgrade head` do host. Migration dentro do `lifespan`
+  daria ao boot da aplicação o poder de alterar schema.
+- `init_queue_tables` **continua existindo** para bancos novos e desenvolvimento, mas deixa de ser
+  o mecanismo de evolução.
+
+O que continua valendo: **não integrar à cadeia Alembic do host**. Acoplar o versionamento do
+pacote ao histórico de migrations de cada projeto é frágil e desnecessário para uma tabela isolada.
+
+### 5.4.1 Estações: N filas paralelas, roteamento do host (v0.3.0)
+
+Até a v0.2.0 o pacote modelava **uma fila só**: `POST /tickets/next` varria todas as senhas do dia
+e devolvia a próxima pelo `priority_order` global. Com recepção, triagem, consultórios, banho e
+farmácia chamando ao mesmo tempo, todos puxariam do mesmo balde.
+
+A fronteira da v0.3.0: **o pacote é o motor de filas; quem decide para qual estação alguém vai é o
+host.** Uma `station` é string opaca declarada em `QueueConfig`, na mesma filosofia dos
+`ticket_types` — o pacote não define quais estações existem nem a ordem entre elas.
+
+O ticket ganha três campos, todos nullable:
+
+- `station` — estação atual; nasce em `config.entry_station`.
+- `station_entered_at` — quando entrou na estação atual, para medir espera por etapa.
+- `queued_since` — **carimbo de chegada original, imutável ao longo da jornada**.
+
+`queued_since` resolve um problema de justiça real: se a ordem de cada fila usasse a entrada na
+estação, quem esperou 40 minutos na recepção entraria no fim da fila do consultório. O FIFO de
+qualquer estação usa `queued_since` (com fallback para `created_at` em senhas anteriores à v0.3.0).
+
+`PATCH /tickets/{id}/station` é o coração da mudança — expressa "terminou na recepção, foi para a
+triagem": move a senha, devolve o status para `na_fila`, preserva `queued_since`, zera o estado de
+chamada (`called_at`, `recall_count`) e responde com o tempo gasto na estação anterior. O pacote
+não guarda histórico de etapas: quem quiser auditar a jornada persiste esse dado no próprio
+domínio.
+
+**Compatibilidade retroativa é requisito**, não cortesia — o pacote atende outros projetos. Sem
+`stations`, tudo opera em modo estação única, `/tickets/next` sem `station` mantém o comportamento
+global, `GET /display` devolve exatamente o JSON da v0.2.0, e os parâmetros/endpoints de estação
+respondem 400. Por isso a release é **minor**.
+
+Não foi introduzida classificação de urgência — descartada no levantamento, e decisão do host se um
+dia existir.
 
 ### 5.5 Ciclo de vida de status (fixo — é a lógica central do pacote)
 
@@ -210,12 +265,13 @@ esperado (um totem físico por unidade, dezenas de senhas por dia, não milhares
 | Verbo | Path | Acesso | Responsabilidade |
 |---|---|---|---|
 | POST | `/tickets` | Público | Totem emite senha. Recebe `ticket_type`, `reference_code` (opcional), `is_priority`/`priority_reason` (se `priority_source == "self_declared"`). Gera `ticket_number` sequencial do dia. |
-| GET | `/display` | Público | Painel de TV: ticket atualmente chamado + últimos N chamados. Pensado para polling (não há infraestrutura de websocket assumida). |
-| GET | `/tickets` | Autenticado (`read_dependency`) | Lista a fila do dia, ordenada por prioridade + FIFO. |
-| POST | `/tickets/next` | Autenticado (`manage_dependency`) | "Chamar próximo" — aplica a lógica de prioridade. |
+| GET | `/display` | Público | Painel de TV: ticket atualmente chamado + últimos N chamados. Pensado para polling (não há infraestrutura de websocket assumida). Com estações, acrescenta `stations[]` — um chamado corrente por estação — mantendo `current` para não quebrar painéis da v0.2.0. |
+| GET | `/tickets` | Autenticado (`read_dependency`) | Lista a fila do dia, ordenada por prioridade + FIFO. Filtro opcional `?station=`. |
+| POST | `/tickets/next` | Autenticado (`manage_dependency`) | "Chamar próximo" — aplica a lógica de prioridade. `?station=` opcional: sem ele, comportamento global da v0.2.0. |
 | PATCH | `/tickets/{id}/recall` | Autenticado (`manage_dependency`) | "Chamar novamente", respeitando `max_recall_attempts`. |
 | PATCH | `/tickets/{id}/no-show` | Autenticado (`manage_dependency`) | Marca "não compareceu". |
 | PATCH | `/tickets/{id}/status` | Autenticado (`manage_dependency`) | Transição manual para `em_atendimento`/`concluido`. |
+| PATCH | `/tickets/{id}/station` | Autenticado (`manage_dependency`) | v0.3.0 — move a senha para outra estação, devolvendo-a a `na_fila`. 400 em modo estação única. |
 
 ## 7. Caso de uso de referência (contexto, não requisito literal)
 
