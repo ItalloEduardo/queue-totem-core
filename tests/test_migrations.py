@@ -35,6 +35,8 @@ CREATE TABLE queue_tickets (
 """
 
 STATION_COLUMNS = {"station", "station_entered_at", "queued_since"}
+ROOM_COLUMN = "room"
+HEAD_REVISION = "0003_room"
 
 
 def _url(tmp_path) -> str:
@@ -83,6 +85,7 @@ class TestGreenfield:
 
         assert "queue_tickets" in _tables(url)
         assert STATION_COLUMNS <= _columns(url)
+        assert ROOM_COLUMN in _columns(url)
 
     def test_version_is_recorded_in_the_package_table(self, tmp_path):
         url = _url(tmp_path)
@@ -90,7 +93,7 @@ class TestGreenfield:
 
         assert VERSION_TABLE == "queue_versions_table"
         assert VERSION_TABLE in _tables(url)
-        assert _scalar(url, f"SELECT version_num FROM {VERSION_TABLE}") == "0002_stations"
+        assert _scalar(url, f"SELECT version_num FROM {VERSION_TABLE}") == HEAD_REVISION
 
     def test_upgrade_is_repeatable(self, tmp_path):
         url = _url(tmp_path)
@@ -121,9 +124,10 @@ class TestBrownfield:
         # A tabela não foi recriada: o dado continua lá.
         assert _scalar(url, "SELECT COUNT(*) FROM queue_tickets") == 1
         assert _scalar(url, "SELECT ticket_number FROM queue_tickets") == "AG-001"
-        # E o delta da v0.3.0 foi aplicado.
+        # E os deltas posteriores foram aplicados.
         assert STATION_COLUMNS <= _columns(url)
-        assert _scalar(url, f"SELECT version_num FROM {VERSION_TABLE}") == "0002_stations"
+        assert ROOM_COLUMN in _columns(url)
+        assert _scalar(url, f"SELECT version_num FROM {VERSION_TABLE}") == HEAD_REVISION
 
     def test_rows_predating_v030_have_null_stations(self, tmp_path):
         url = _url(tmp_path)
@@ -155,7 +159,7 @@ class TestHostIsolation:
         command.upgrade(build_config(url), "head")
 
         assert _scalar(url, "SELECT version_num FROM alembic_version") == "host_head"
-        assert _scalar(url, f"SELECT version_num FROM {VERSION_TABLE}") == "0002_stations"
+        assert _scalar(url, f"SELECT version_num FROM {VERSION_TABLE}") == HEAD_REVISION
 
 
 class TestDowngrade:

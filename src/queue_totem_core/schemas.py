@@ -156,6 +156,7 @@ class TicketOut(BaseModel):
     recall_count: int
     station: str | None = None
     station_label: str | None = None
+    room: str | None = None
     station_entered_at: datetime | None = None
     queued_since: datetime | None = None
     created_at: datetime

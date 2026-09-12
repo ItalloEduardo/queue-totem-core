@@ -265,6 +265,15 @@ def build_queue_router(
                 "comportamento da v0.2.0: próxima senha global."
             ),
         ),
+        room: str | None = Query(
+            default=None,
+            max_length=64,
+            description=(
+                "Posto de onde a chamada está sendo feita, para o painel dizer onde a "
+                "pessoa deve se apresentar. String opaca; sem o parâmetro, a sala da "
+                "chamada anterior é limpa."
+            ),
+        ),
         db: AsyncSession = Depends(get_db),
     ) -> TicketOut:
         if station is not None:
@@ -312,7 +321,7 @@ def build_queue_router(
                     QueueTicket.id == ticket.id,
                     QueueTicket.status == STATUS_NA_FILA,
                 )
-                .values(status=STATUS_CHAMADO, called_at=utcnow())
+                .values(status=STATUS_CHAMADO, called_at=utcnow(), room=room)
             )
             await db.commit()
             if result.rowcount == 1:
@@ -425,6 +434,9 @@ def build_queue_router(
         ticket.station = target
         ticket.station_entered_at = now
         ticket.status = STATUS_NA_FILA
+        # A sala pertence à chamada, não à senha: ao trocar de estação ela deixa
+        # de valer, e o painel não pode anunciar um posto da etapa anterior.
+        ticket.room = None
         # queued_since NÃO é tocado: é a chegada original e define o FIFO da
         # nova fila. Quem esperou na recepção não recomeça atrás de todo mundo.
         ticket.called_at = None

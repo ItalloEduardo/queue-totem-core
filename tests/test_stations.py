@@ -330,3 +330,60 @@ class TestStationConfigValidation:
     def test_empty_station_list_rejected(self):
         with pytest.raises(ValidationError, match="lista vazia"):
             make_config(stations=[], entry_station="a")
+
+
+class TestRoom:
+    """A sala pertence à chamada: é ela que o painel anuncia."""
+
+    async def test_call_records_the_room(self, station_client):
+        await emit(station_client, "AG")
+        called = await call_next(station_client, station="recepcao", room="Guichê 2")
+        assert called["room"] == "Guichê 2"
+
+    async def test_room_is_optional(self, client):
+        await emit(client, "AG")
+        assert (await call_next(client))["room"] is None
+
+    async def test_recall_keeps_the_room(self, station_client):
+        ticket = await emit(station_client, "AG")
+        await call_next(station_client, station="recepcao", room="Guichê 2")
+        resp = await station_client.patch(
+            f"/queue/tickets/{ticket['id']}/recall", headers=MANAGE_HEADERS
+        )
+        assert resp.status_code == 200, resp.text
+        # É a mesma chamada, para o mesmo lugar.
+        assert resp.json()["room"] == "Guichê 2"
+
+    async def test_new_call_replaces_the_room(self, station_client):
+        await emit(station_client, "AG")
+        await call_next(station_client, station="recepcao", room="Guichê 1")
+        await emit(station_client, "AG")
+        second = await call_next(station_client, station="recepcao", room="Guichê 2")
+        assert second["room"] == "Guichê 2"
+
+    async def test_call_without_room_clears_the_previous_one(self, station_client):
+        ticket = await emit(station_client, "AG")
+        await call_next(station_client, station="recepcao", room="Guichê 1")
+        await move_station(station_client, ticket["id"], "recepcao")
+        recalled = await call_next(station_client, station="recepcao")
+        assert recalled["room"] is None
+
+    async def test_moving_station_clears_the_room(self, station_client):
+        ticket = await emit(station_client, "AG")
+        await call_next(station_client, station="recepcao", room="Guichê 1")
+        # O posto da recepção não vale no consultório: anunciá-lo mandaria a
+        # pessoa para o lugar errado.
+        assert (await move_station(station_client, ticket["id"], "consultorio"))["room"] is None
+
+    async def test_display_carries_the_room_per_station(self, station_client):
+        a = await emit(station_client, "AG")
+        b = await emit(station_client, "AG")
+        await move_station(station_client, b["id"], "consultorio")
+        await call_next(station_client, station="recepcao", room="Guichê 1")
+        await call_next(station_client, station="consultorio", room="Consultório 2")
+
+        body = (await station_client.get("/queue/display")).json()
+        by_station = {s["station"]: s for s in body["stations"]}
+        assert by_station["recepcao"]["current"]["room"] == "Guichê 1"
+        assert by_station["consultorio"]["current"]["room"] == "Consultório 2"
+        assert by_station["recepcao"]["current"]["id"] == a["id"]

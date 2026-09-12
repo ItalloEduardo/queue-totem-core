@@ -129,10 +129,14 @@ async def emit(client, ticket_type: str, **kwargs) -> dict:
     return resp.json()
 
 
-async def call_next(client, station: str | None = None) -> dict:
-    params = {"station": station} if station is not None else None
+async def call_next(client, station: str | None = None, room: str | None = None) -> dict:
+    params = {}
+    if station is not None:
+        params["station"] = station
+    if room is not None:
+        params["room"] = room
     resp = await client.post(
-        "/queue/tickets/next", params=params, headers=MANAGE_HEADERS
+        "/queue/tickets/next", params=params or None, headers=MANAGE_HEADERS
     )
     assert resp.status_code == 200, resp.text
     return resp.json()

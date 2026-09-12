@@ -216,6 +216,12 @@ O ticket ganha três campos, todos nullable:
 estação, quem esperou 40 minutos na recepção entraria no fim da fila do consultório. O FIFO de
 qualquer estação usa `queued_since` (com fallback para `created_at` em senhas anteriores à v0.3.0).
 
+Uma estação pode ter mais de um posto atendendo ao mesmo tempo. `room` (v0.4.0) é a string opaca
+que diz de onde a chamada saiu, gravada a cada `POST /tickets/next` e devolvida pelo painel. Ela
+pertence à **chamada**, não à senha: mudar de estação a limpa, porque anunciar o posto da etapa
+anterior manda a pessoa para o lugar errado. O pacote não sabe quais postos existem — quem declara é
+o host, como em tudo mais.
+
 `PATCH /tickets/{id}/station` é o coração da mudança — expressa "terminou na recepção, foi para a
 triagem": move a senha, devolve o status para `na_fila`, preserva `queued_since`, zera o estado de
 chamada (`called_at`, `recall_count`) e responde com o tempo gasto na estação anterior. O pacote

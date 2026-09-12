@@ -56,6 +56,10 @@ class QueueTicket(Base):
     # Nullable por compatibilidade: bancos anteriores à v0.3.0 e projetos em
     # modo estação única mantêm essas colunas vazias.
     station: Mapped[str | None] = mapped_column(String(32), index=True)
+    # Onde a chamada aconteceu dentro da estação (v0.4.0). String opaca: uma
+    # estação pode ter vários postos atendendo em paralelo, e o painel precisa
+    # dizer para qual deles a pessoa deve ir. Preenchida a cada chamada.
+    room: Mapped[str | None] = mapped_column(String(64))
     station_entered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Carimbo de chegada original, imutável ao longo da jornada entre estações.
     # É ele que define o FIFO em qualquer fila — não o station_entered_at.

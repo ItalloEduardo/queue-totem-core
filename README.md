@@ -10,7 +10,7 @@ Contexto completo de design e decisões: [`docs/PLANO.md`](docs/PLANO.md).
 Sem PyPI — dependência git fixada por tag semver:
 
 ```
-queue-totem-core @ git+https://github.com/<usuario>/queue-totem-core.git@v0.3.0
+queue-totem-core @ git+https://github.com/<usuario>/queue-totem-core.git@v0.4.0
 ```
 
 Requisitos do host: Python 3.11+, FastAPI 0.104+, SQLAlchemy 2.0 async, Pydantic v2.
@@ -87,6 +87,11 @@ config = QueueConfig(
   anterior). O pacote não guarda histórico de etapas — quem quiser auditar a jornada persiste
   esses campos no próprio domínio.
 - `priority_order` e `normals_per_priority` continuam valendo, agora **dentro de cada estação**.
+- Uma estação pode ter **vários postos atendendo em paralelo** (dois consultórios, dois guichês).
+  `POST /tickets/next?station=X&room=Y` grava a sala da chamada, e o painel a devolve junto com o
+  chamado. `room` é string opaca, opcional, e pertence à **chamada**: rechamar mantém, chamar de
+  novo substitui, e mudar de estação limpa — anunciar o posto da etapa anterior mandaria a pessoa
+  para o lugar errado.
 - Sem `stations`, `POST /tickets/next?station=...`, `GET /tickets?station=...` e o PATCH de
   estação respondem **400**.
 
@@ -117,7 +122,7 @@ são aceitos. Outros comandos: `current`, `history`, `heads`, `stamp`, `downgrad
 | POST | `/tickets` | Público | Totem emite senha (número sequencial do dia por tipo) |
 | GET | `/display` | Público | Painel de TV: chamada atual + últimas N; com estações, um corrente por estação |
 | GET | `/tickets` | `read_dependency` | Fila do dia, ordenada por prioridade + FIFO (`?status=`, `?station=` opcionais) |
-| POST | `/tickets/next` | `manage_dependency` | Chamar próxima senha (`?station=` opcional; aplica `priority_order` + `normals_per_priority`) |
+| POST | `/tickets/next` | `manage_dependency` | Chamar próxima senha (`?station=` e `?room=` opcionais; aplica `priority_order` + `normals_per_priority`) |
 | PATCH | `/tickets/{id}/recall` | `manage_dependency` | Chamar novamente (respeita `max_recall_attempts`) |
 | PATCH | `/tickets/{id}/no-show` | `manage_dependency` | Marcar não compareceu |
 | PATCH | `/tickets/{id}/status` | `manage_dependency` | Transição manual: `em_atendimento` / `concluido` |
